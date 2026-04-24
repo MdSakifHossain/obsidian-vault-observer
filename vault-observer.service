@@ -30,7 +30,7 @@ RestartSec=15s
 # ── Environment ─────────────────────────────────────────────────────────────
 # Edit these to match your setup.
 Environment=VAULT_DIR=%h/obsidian-vault
-Environment=COOLDOWN_SECONDS=180
+Environment=INTERVAL_SECONDS=180
 Environment=LOG_FILE=%h/.local/logs/vault-observer.log
 Environment=GIT_BRANCH=main
 Environment=COMMIT_AUTHOR_NAME=Vault Observer
