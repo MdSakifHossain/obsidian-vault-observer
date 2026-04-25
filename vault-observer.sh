@@ -67,7 +67,7 @@ check_vault() {
         git -C "$VAULT_DIR" \
             -c "user.name=$COMMIT_AUTHOR_NAME" \
             -c "user.email=$COMMIT_AUTHOR_EMAIL" \
-            commit -m "Observer: Initial commit — $(date '+%d-%m-%Y @%I:%M %p')" || true
+            commit -m "Observer: Initial commit — $(date '+%d-%m-%Y %I:%M %p')" || true
         log "INFO" "Git repo initialised."
     fi
 }
@@ -77,7 +77,7 @@ check_vault() {
 # ---------------------------------------------------------------------------
 commit_changes() {
     local now
-    now=$(date '+%d-%m-%Y @%I:%M %p')
+    now=$(date '+%d-%m-%Y %I:%M %p')
     local msg="Observer: Pushed at $now"
 
     cd "$VAULT_DIR"
