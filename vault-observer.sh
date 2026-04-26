@@ -1,18 +1,17 @@
 #!/usr/bin/env zsh
 # =============================================================================
 # vault-observer.sh — Obsidian Git Auto-Commit Daemon (Polling Model)
-# Wakes up every INTERVAL_SECONDS, checks for changes, commits and pushes.
-# Maximum possible data loss = INTERVAL_SECONDS. Always. No exceptions.
-# Compatible with: zsh, bash | Requires: git
+# DO NOT edit settings here. Edit config.env and re-run install.sh instead.
 # =============================================================================
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Configuration — edit these to match your setup
+# Configuration — all values come from environment (set by systemd via config.env)
+# Defaults here are fallbacks only, config.env always wins after install.
 # ---------------------------------------------------------------------------
 VAULT_DIR="${VAULT_DIR:-$HOME/obsidian-vault}"
-INTERVAL_SECONDS="${INTERVAL_SECONDS:-180}"     # how often to wake up and check
+INTERVAL_SECONDS="${INTERVAL_SECONDS:-180}"
 LOG_FILE="${LOG_FILE:-$HOME/.local/logs/vault-observer.log}"
 MAX_LOG_LINES="${MAX_LOG_LINES:-500}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
@@ -32,7 +31,6 @@ log() {
     echo "$line"
     echo "$line" >> "$LOG_FILE"
 
-    # Lightweight log rotation — keeps file from growing forever
     local line_count
     line_count=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
     if (( line_count > MAX_LOG_LINES )); then
@@ -73,7 +71,7 @@ check_vault() {
 }
 
 # ---------------------------------------------------------------------------
-# Commit — stages and commits everything, returns 0 if committed, 1 if nothing to commit
+# Commit
 # ---------------------------------------------------------------------------
 commit_changes() {
     local now
@@ -83,7 +81,6 @@ commit_changes() {
     cd "$VAULT_DIR"
     git add -A
 
-    # Nothing staged? bail out early
     if git diff --cached --quiet; then
         return 1
     fi
@@ -100,10 +97,9 @@ commit_changes() {
 }
 
 # ---------------------------------------------------------------------------
-# Push — runs after every successful commit
+# Push
 # ---------------------------------------------------------------------------
 push_changes() {
-    # No remote configured? warn and skip — don't crash
     if ! git -C "$VAULT_DIR" remote get-url "$GIT_REMOTE" &>/dev/null; then
         log "WARN" "No remote '$GIT_REMOTE' found — skipping push."
         log "WARN" "To add one: git -C $VAULT_DIR remote add origin <your-github-url>"
@@ -115,7 +111,7 @@ push_changes() {
     else
         local exit_code=$?
         if (( exit_code == 124 )); then
-            log "ERROR" "Push timed out after 30s — commit is safe locally, will retry next cycle."
+            log "ERROR" "Push timed out after 30s — will retry next cycle."
         else
             log "ERROR" "Push failed (exit $exit_code) — commit is safe locally, will retry next cycle."
         fi
@@ -123,7 +119,7 @@ push_changes() {
 }
 
 # ---------------------------------------------------------------------------
-# Graceful shutdown — commit any pending changes before dying
+# Graceful shutdown
 # ---------------------------------------------------------------------------
 cleanup() {
     log "INFO" "Observer shutting down (signal received)."
@@ -139,7 +135,7 @@ cleanup() {
 trap cleanup SIGTERM SIGINT SIGHUP
 
 # ---------------------------------------------------------------------------
-# Main loop — the polling model
+# Main loop
 # ---------------------------------------------------------------------------
 main() {
     mkdir -p "$(dirname "$LOG_FILE")"
@@ -158,21 +154,14 @@ main() {
     log "INFO" "Log       : $LOG_FILE"
     log "INFO" "======================================================"
 
-    # The core loop — dead simple
     while true; do
-
-        # Sleep first — no point checking the moment we boot
         sleep "$INTERVAL_SECONDS"
-
         log "INFO" "Checkpoint — scanning for changes..."
-
-        # commit_changes returns 0 if it committed, 1 if nothing changed
         if commit_changes; then
             push_changes
         else
             log "INFO" "No changes detected — going back to sleep."
         fi
-
     done
 }
 

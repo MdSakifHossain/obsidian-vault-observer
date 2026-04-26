@@ -6,9 +6,9 @@ A lightweight background daemon for Linux that watches your Obsidian vault and a
 
 ## How It Works
 
-The observer runs silently as a systemd service from startup. Every 3 minutes (configurable), it wakes up, checks if anything changed in your vault, and if so — commits and pushes to GitHub. It then goes back to sleep. No event listeners, no complex logic. Just a reliable checkpoint on a fixed schedule.
+The observer runs silently as a systemd service from startup. Every 3 minutes (configurable), it wakes up, checks if anything changed in your vault, and if so — commits and pushes to GitHub. It then goes back to sleep.
 
-```txt
+```
 boot → observer starts → sleeps 3 min → checks for changes → commits + pushes → sleeps again → repeat
 ```
 
@@ -16,45 +16,59 @@ The maximum data loss in any power cut scenario is exactly one interval. If you 
 
 ---
 
+## Project Structure
+
+```
+vault-observer/
+├── config.env            ← THE ONLY FILE YOU EVER NEED TO EDIT
+├── vault-observer.sh     ← main observer script (do not edit directly)
+├── vault-observer.service← systemd service template (do not edit directly)
+├── install.sh            ← installer (run this after every config change)
+├── README.md
+└── CONTEXT.md
+```
+
+**The workflow is simple:** edit `config.env` → run `./install.sh` → done. The installer reads your config and wires everything up automatically.
+
+---
+
 ## Requirements
 
-- Ubuntu 24.04 (or any systemd-based Linux)
+- Ubuntu 24.04 or any systemd-based Linux
 - `git` installed
-- A GitHub account with SSH authentication configured
-- Your Obsidian vault folder already initialized as a git repo with a remote pointing to GitHub
+- A GitHub account with credentials configured in the terminal
+- Your Obsidian vault folder already linked to a GitHub remote
 
 ---
 
 ## Pre-Installation
 
-Before running the installer, make sure these are in order.
-
-**1. Install dependencies**
+**1. Install git**
 
 ```bash
 sudo apt install git
 ```
 
-**2. Verify your vault is a git repo with a GitHub remote**
+**2. Verify your vault has a GitHub remote**
 
 ```bash
 git -C ~/obsidian-vault remote -v
 ```
 
-You should see something like:
+Expected output:
 
-```bash
+```
 origin  git@github.com:your-username/obsidian-vault.git (fetch)
 origin  git@github.com:your-username/obsidian-vault.git (push)
 ```
 
-If this shows nothing, add the remote manually:
+If blank, add it:
 
 ```bash
 git -C ~/obsidian-vault remote add origin git@github.com:YOUR_USERNAME/YOUR_REPO.git
 ```
 
-**3. Verify SSH authentication with GitHub**
+**3. Verify SSH authentication**
 
 ```bash
 ssh -T git@github.com
@@ -62,11 +76,11 @@ ssh -T git@github.com
 
 Expected response:
 
-```bash
+```
 Hi your-username! You've successfully authenticated, but GitHub does not provide shell access.
 ```
 
-The second part of that message ("does not provide shell access") is normal. If you see this, SSH is working.
+The "does not provide shell access" part is always there and always normal.
 
 **4. Make sure the terminal can push without being asked for credentials**
 
@@ -75,36 +89,78 @@ git config --global credential.helper store
 git -C ~/obsidian-vault push origin main
 ```
 
-If it asks for a password here, use a GitHub Personal Access Token — not your GitHub account password. Generate one at: GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token. Check the `repo` scope and set expiration to `No expiration`. Use this token as the password. After one successful push, credentials are saved permanently and the observer handles everything silently from here.
+If it asks for a password, use a GitHub Personal Access Token — not your GitHub account password. Generate one at: GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → check `repo` → set expiration to `No expiration`. Enter this token as the password. After one successful push, credentials are saved permanently.
 
 ---
 
 ## Installation
 
+**Step 1 — Clone the repo**
+
 ```bash
-# Clone the repo
 git clone <this-repo>
 cd <this-repo>
+```
 
-# Make scripts executable
+**Step 2 — Edit `config.env`**
+
+Open `config.env` and set your vault path and preferred interval:
+
+```bash
+nano config.env
+```
+
+The only line most people need to change:
+
+```
+VAULT_DIR="$HOME/obsidian-vault"
+```
+
+**Step 3 — Run the installer**
+
+```bash
 chmod +x install.sh vault-observer.sh
-
-# Run the installer
 ./install.sh
 ```
 
-The installer will ask two questions:
+The installer shows you your settings and asks for confirmation before doing anything. It then installs the script, generates the service file with your config baked in, and starts the observer.
 
-- Full path to your Obsidian vault (e.g. `/home/sakif/obsidian-vault`)
-- Checkpoint interval in seconds (recommended: `180` for 3 minutes)
+---
 
-It then copies the script, registers the systemd service, and starts the observer automatically.
+## Changing Any Setting Later
+
+This is the key workflow. You never edit the installed files directly.
+
+```
+1. Open config.env in your cloned repo
+2. Make your change
+3. Run ./install.sh again
+```
+
+The installer stops the old service, reinstalls everything with the new config, and restarts. One command does it all.
+
+---
+
+## Configuration Reference
+
+All settings live in `config.env`. Here is what each one does:
+
+| Setting               | Default                            | What it controls                        |
+| --------------------- | ---------------------------------- | --------------------------------------- |
+| `VAULT_DIR`           | `$HOME/obsidian-vault`             | Path to your Obsidian vault             |
+| `INTERVAL_SECONDS`    | `180`                              | How often to check and commit (seconds) |
+| `GIT_BRANCH`          | `main`                             | Which branch to push to                 |
+| `GIT_REMOTE`          | `origin`                           | Remote name (almost always origin)      |
+| `COMMIT_AUTHOR_NAME`  | `Vault Observer`                   | Name shown in git log                   |
+| `COMMIT_AUTHOR_EMAIL` | `observer@local`                   | Email shown in git log                  |
+| `LOG_FILE`            | `~/.local/logs/vault-observer.log` | Where the log is written                |
+| `MAX_LOG_LINES`       | `500`                              | Log size before rotation                |
 
 ---
 
 ## Post-Installation Verification
 
-**Check that the service is running:**
+**Check the service is running:**
 
 ```bash
 systemctl --user status vault-observer
@@ -118,44 +174,43 @@ Look for `Active: active (running)`.
 tail -f ~/.local/logs/vault-observer.log
 ```
 
-This streams every action the observer takes in real time. A healthy log looks like this:
+A healthy log looks like this:
 
-```bash
-[24-04-2026 18:17:02] [INFO] Vault Observer started (PID 17686)
-[24-04-2026 18:17:02] [INFO] Watching  : /home/sakif/obsidian-vault
-[24-04-2026 18:17:02] [INFO] Interval  : every 180s
-[24-04-2026 18:17:02] [INFO] Max loss  : 180s of work
-[24-04-2026 18:40:43] [INFO] Checkpoint — scanning for changes...
-[24-04-2026 18:40:43] [INFO] Committed 1 file(s) — "Observer: Pushed at 24-04-2026 @06:40 PM"
-[24-04-2026 18:40:46] [INFO] Pushed successfully to origin/main
+```
+[25-04-2026 18:17:02] [INFO] Vault Observer started (PID 17686)
+[25-04-2026 18:17:02] [INFO] Watching  : /home/sakif/obsidian-vault
+[25-04-2026 18:17:02] [INFO] Interval  : every 180s
+[25-04-2026 18:17:02] [INFO] Max loss  : 180s of work
+[25-04-2026 18:20:02] [INFO] Checkpoint — scanning for changes...
+[25-04-2026 18:20:02] [INFO] Committed 1 file(s) — "Observer: Pushed at 25-04-2026 06:20 PM"
+[25-04-2026 18:20:04] [INFO] Pushed successfully to origin/main
+[25-04-2026 18:23:04] [INFO] Checkpoint — scanning for changes...
+[25-04-2026 18:23:04] [INFO] No changes detected — going back to sleep.
 ```
 
-**Trigger a manual test:**
-
-Create a file inside your vault, wait the full interval, and watch the log. You should see a commit and push appear automatically.
-
-**Confirm on GitHub:**
-
-Go to your GitHub repo. The commit will appear with the message `Observer: Pushed at DD-MM-YYYY @HH:MM AM/PM`.
+**Trigger a manual test:** Create or edit any file inside your vault and wait one full interval. The commit will appear on GitHub with the message `Observer: Pushed at DD-MM-YYYY HH:MM AM/PM`.
 
 ---
 
 ## Service Control
 
 ```bash
-# Stop the observer
+# Status
+systemctl --user status vault-observer
+
+# Stop
 systemctl --user stop vault-observer
 
-# Start it again
+# Start
 systemctl --user start vault-observer
 
-# Restart (use this after any config changes)
+# Restart
 systemctl --user restart vault-observer
 
-# View live system logs (alternative to the log file)
+# Live journal log
 journalctl --user -u vault-observer -f
 
-# View recent git history in your vault
+# View recent git history in vault
 git -C ~/obsidian-vault log --oneline -10
 ```
 
@@ -163,172 +218,82 @@ git -C ~/obsidian-vault log --oneline -10
 
 ## Recovering a File After a Power Cut
 
-If a file gets wiped or corrupted during a power outage, restore the last committed version:
-
 ```bash
 git -C ~/obsidian-vault checkout HEAD -- "path/to/your-note.md"
 ```
 
-This pulls the exact state from the last Observer commit and overwrites the damaged file.
+This restores the file to exactly how it was at the last Observer commit.
 
 ---
 
-## Configuration Reference
+## Removing a Folder From Git Tracking
 
-All configurable values live in two places depending on what you want to change.
-
-### Changing the interval
-
-Open the service file:
+If a folder is already pushed to GitHub and you want to remove it (e.g. `.obsidian/`):
 
 ```bash
-nano ~/.config/systemd/user/vault-observer.service
+# 1. Add to gitignore
+echo ".obsidian/" >> ~/obsidian-vault/.gitignore
+
+# 2. Stop tracking it (leaves your local files untouched)
+git -C ~/obsidian-vault rm -r --cached .obsidian/
+
+# 3. Commit and push the removal
+git -C ~/obsidian-vault add .gitignore
+git -C ~/obsidian-vault commit -m "chore: remove .obsidian from tracking"
+git -C ~/obsidian-vault push origin main
 ```
 
-Find and edit:
-
-```bash
-Environment=INTERVAL_SECONDS=180
-```
-
-Then reload:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user restart vault-observer
-```
-
-### Changing the vault path
-
-Same file, same process. Edit:
-
-```bash
-Environment=VAULT_DIR=/home/sakif/obsidian-vault
-```
-
-Also update this line in the same file to match:
-
-```bash
-ReadWritePaths=/home/sakif/obsidian-vault /home/sakif/.local
-```
-
-Then reload and restart.
-
-### Changing the commit message format
-
-Open the main script:
-
-```bash
-nano ~/.local/bin/vault-observer.sh
-```
-
-Find this line inside the `commit_changes` function:
-
-```bash
-local msg="Observer: Pushed at $now"
-```
-
-Change the text however you like. The `$now` variable is a formatted timestamp. Keep it or remove it — your call.
-
-Then restart the service:
-
-```bash
-systemctl --user restart vault-observer
-```
-
-No daemon-reload needed when you only edit the script, not the service file.
-
-### Changing which files are ignored
-
-The observer commits everything git tracks. To exclude files from commits, add them to your vault's `.gitignore`:
-
-```bash
-nano ~/obsidian-vault/.gitignore
-```
-
-Example entries:
-
-```txt
-.obsidian/workspace.json
-.obsidian/workspace-mobile.json
-*.tmp
-```
-
-### Renaming the observer script
-
-If you rename `vault-observer.sh`, you must also update the service file to match. Open:
-
-```bash
-nano ~/.config/systemd/user/vault-observer.service
-```
-
-Find:
-
-```bash
-ExecStart=%h/.local/bin/vault-observer.sh
-```
-
-Change it to the new name. Then:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user restart vault-observer
-```
+The folder disappears from GitHub. Your local files are untouched. The observer will never touch it again.
 
 ---
 
 ## Troubleshooting
 
-### Push failed (exit 128)
+**Push failed (exit 128)**
 
-The observer can commit but cannot push. Most likely cause: the terminal has not authenticated with GitHub yet.
+The terminal has not authenticated with GitHub yet.
+
+```bash
+git config --global credential.helper store
+git -C ~/obsidian-vault push origin main
+```
+
+Enter your username and Personal Access Token when prompted. After this one push, all future pushes are silent.
+
+**Push failed (exit 1)**
+
+Run the push manually to read the actual error:
 
 ```bash
 git -C ~/obsidian-vault push origin main
 ```
 
-Run this manually. If it asks for credentials, enter your GitHub username and Personal Access Token (not your password). After one successful manual push, all future pushes from the observer work silently.
-
-### Push failed (exit 1) repeatedly
-
-Run the push manually and read the error:
-
-```bash
-git -C ~/obsidian-vault push origin main
-```
-
-Common causes: wrong branch name (`main` vs `master`), no remote configured, or expired credentials.
-
-### "No remote configured" in the log
+**"No remote configured" in the log**
 
 ```bash
 git -C ~/obsidian-vault remote add origin git@github.com:YOUR_USERNAME/YOUR_REPO.git
 ```
 
-### Service not starting after reboot
+**Service not starting after reboot**
 
 ```bash
 journalctl --user -u vault-observer -f
 ```
 
-Read the error. Common cause: the vault path in the service file doesn't match where your vault actually is.
+Most common cause: the vault path in `config.env` does not match where your vault actually is.
 
-### SSH authentication fails
+**Changes not being pushed after editing config**
 
-```bash
-ssh-keygen -t ed25519 -C "your@email.com"
-cat ~/.ssh/id_ed25519.pub
-```
-
-Copy the output and add it at: GitHub → Settings → SSH and GPG keys → New SSH key.
+Make sure you ran `./install.sh` after editing `config.env`. Editing `config.env` alone does nothing — the installer is what applies the changes.
 
 ---
 
-## Files
+## Installed File Locations
 
-| File                     | Location after install                          | Purpose         |
-| ------------------------ | ----------------------------------------------- | --------------- |
-| `vault-observer.sh`      | `~/.local/bin/vault-observer.sh`                | The main script |
-| `vault-observer.service` | `~/.config/systemd/user/vault-observer.service` | systemd config  |
-| `install.sh`             | run once, not kept                              | Setup wizard    |
-| Log file                 | `~/.local/logs/vault-observer.log`              | Runtime log     |
+| File            | Location                                        |
+| --------------- | ----------------------------------------------- |
+| Observer script | `~/.local/bin/vault-observer.sh`                |
+| Service file    | `~/.config/systemd/user/vault-observer.service` |
+| Log file        | `~/.local/logs/vault-observer.log`              |
+
+Do not edit these directly. Edit `config.env` in your cloned repo and re-run `./install.sh`.

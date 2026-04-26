@@ -1,6 +1,5 @@
-# vault-observer — Session Report
-
-Feed this file to Claude if context is lost. It contains the full history of decisions, problems, and solutions from the original build session.
+# vault-observer — Session Context
+### Feed this file to Claude if context is lost. It contains the full history of decisions, problems, and solutions from the original build session.
 
 ---
 
@@ -10,250 +9,230 @@ Feed this file to Claude if context is lost. It contains the full history of dec
 **OS:** Ubuntu 24.04, shell: zsh
 **Hardware:** Ryzen 7 7700, 32GB DDR5, 1TB NVMe Gen 4
 **Editor:** Obsidian (markdown vault), also uses VSCode
-**Skill level:** Knows JavaScript at a decent level. No bash/shell scripting knowledge. Recently switched to Linux. Treat explanations accordingly — use JS analogies, avoid jargon without explanation.
+**Skill level:** Knows JavaScript at a decent level. No bash/shell scripting knowledge. Knows basic git: `git add .`, `git commit -m`, `git push`, basic remote setup. Recently switched to Linux. Treat all explanations with JS analogies. Never assume Linux or bash knowledge.
 
 ---
 
-## The Problem That Started Everything
+## The Problem
 
-Frequent power outages (load shedding — a scheduled power cut common in Bangladesh). During outages, Obsidian's atomic write process gets interrupted mid-write, resulting in 0-byte files or completely wiped note content. A UPS is not currently a viable solution due to budget constraints.
+Frequent power outages (load shedding — scheduled power cuts common in Bangladesh). During outages, Obsidian's atomic write process gets interrupted, resulting in 0-byte files or wiped note content. A UPS is not currently viable due to budget.
 
-**Goal:** A background process that automatically commits and pushes the Obsidian vault to GitHub at regular intervals so that power cuts result in a maximum data loss of one interval, not the entire file.
+**Goal:** A background process that automatically commits and pushes the Obsidian vault to GitHub at regular intervals so power cuts result in a maximum data loss of one interval, not the entire file.
 
 ---
 
-## What Was Built — Version History
+## Version History
 
-### V1 — Event-Driven Model (inotify + debounce)
+### V1 — Event-Driven with inotify (deprecated)
 
-**How it worked:** Used `inotifywait` (from `inotify-tools` package) to listen for filesystem events. When a file changed, started a 3-minute cooldown timer. Every new change reset the timer. When the vault was quiet for 3 full minutes, it committed and pushed.
+Used `inotifywait` to listen for filesystem events. On any file change, started a 3-minute debounce timer. When vault was quiet for 3 full minutes, committed and pushed.
 
-**Files:**
+**Fatal flaw discovered by user:** If editing continuously for 13 minutes and power cuts just before the cooldown completes, you lose all 13 minutes. The user independently identified this as a real problem — and they were correct. This is not a misunderstanding.
 
-- `vault-observer.sh` — main watcher script
-- `vault-observer.service` — systemd user service unit
-- `install.sh` — interactive installer
+### V2 — Polling Model (working but no config file)
 
-**Problem discovered by user:** If you edit continuously for 13 minutes and power cuts just before the 3-minute idle period completes, you lose all 13 minutes of work. The cooldown only starts after you stop editing. This is a real and valid concern, not an imaginary one.
+Replaced inotify with a simple `while true; sleep; check; commit; push` loop. Fixed the data loss problem — maximum loss is always exactly one interval regardless of editing duration. `inotify-tools` dependency removed.
 
-**User's own model (which they described correctly):** Wake up on a fixed schedule, check for changes, commit and push if found, go back to sleep, repeat. The user independently invented the polling pattern.
+**Remaining problem:** Settings were split between `vault-observer.service` (for systemd) and `vault-observer.sh` (for defaults). To change something like the commit message format, user had to edit the installed file at `~/.local/bin/vault-observer.sh` directly, not the cloned repo. User correctly identified this as wrong — they wanted to edit the cloned repo and re-run the installer to apply changes.
 
-### V2 — Polling Model (current, recommended)
+Also discovered during V2: the commit message used `@` before the time (`Observer: Pushed at 25-04-2026 @06:34 PM`). On GitHub, the `@` symbol turns into a mention link pointing to `https://github.com/06` which looks broken. User asked to remove the `@`. Final chosen format: `Observer: Pushed at 25-04-2026 06:34 PM` using `date '+%d-%m-%Y %I:%M %p'`.
 
-**How it works:** No inotify, no event listeners. A simple `while true` loop that sleeps for the configured interval, wakes up, runs `git add -A` and checks if anything changed, commits and pushes if so, then sleeps again.
+### V3 — Polling Model with Central Config (current)
 
-**Key guarantee:** Maximum data loss = interval length. Always. Even during continuous editing sessions.
+Added `config.env` as the single source of truth. The installer reads `config.env`, fills placeholders in the service template, and installs everything. User never needs to touch any installed file. Workflow is: edit `config.env` → run `./install.sh` → done.
 
-**JS pseudocode equivalent:**
+---
 
-```js
-while (true) {
-  await sleep(INTERVAL_SECONDS * 1000);
-  const hasChanges = await git.diff();
-  if (hasChanges) {
-    await git.add();
-    await git.commit(`Observer: Pushed at ${timestamp}`);
-    await git.push("origin", "main");
-  }
-}
+## Current File Structure
+
+```
+vault-observer/
+├── config.env              ← only file the user ever edits
+├── vault-observer.sh       ← main script, reads env vars set by systemd
+├── vault-observer.service  ← template with __PLACEHOLDERS__ filled by installer
+├── install.sh              ← reads config.env, fills placeholders, installs everything
+├── README.md
+└── CONTEXT.md              ← this file
 ```
 
-**What changed from V1 to V2:**
+---
 
-- `inotify-tools` dependency removed entirely — only `git` needed now
-- Entire inotify/debounce system replaced with `sleep` + `git diff` loop
-- Config variable renamed from `COOLDOWN_SECONDS` to `INTERVAL_SECONDS`
-- `vault-observer.service` and `install.sh` unchanged structurally
+## How config.env Works
+
+`install.sh` sources `config.env` to load all variables, then uses `sed` to replace `__PLACEHOLDER__` strings in `vault-observer.service` with the actual values before writing the final service file to `~/.config/systemd/user/`. The observer script reads values from environment variables set by systemd — so it always uses whatever was baked in at install time.
+
+When the user wants to change any setting:
+1. Edit `config.env` in the cloned repo
+2. Run `./install.sh`
+3. Installer stops old service, reinstalls script and service file, restarts
 
 ---
 
-## Architecture — File by File
+## Architecture — Function by Function
 
-### `vault-observer.sh`
+### vault-observer.sh
 
-The main worker. Analogous to `server.js` in a Node project.
+**check_deps()** — verifies git is installed. Exits with helpful message if not.
 
-**Key functions:**
+**check_vault()** — verifies vault directory exists and has `.git`. Auto-inits git repo if missing.
 
-`check_deps()` — verifies `git` is installed. Crashes with a helpful message if not.
+**commit_changes()** — runs `git add -A`, checks staged diff, commits with timestamped message. Returns 0 if committed, 1 if nothing to commit. Uses `-A` flag specifically to capture deletions too (not just additions and modifications).
 
-`check_vault()` — verifies the vault directory exists and has a `.git` folder. If no git repo found, runs `git init` automatically (one-time setup).
+**push_changes()** — checks remote exists first, then pushes with 30s timeout. Push failure is non-fatal — local commit already succeeded. Will retry next cycle.
 
-`commit_changes()` — runs `git add -A`, checks if anything is staged, commits with a timestamped message. Returns exit code 0 if committed, 1 if nothing to commit.
+**cleanup()** — trap for SIGTERM/SIGINT/SIGHUP. Runs final commit+push before dying. This means `systemctl --user stop vault-observer` triggers a final checkpoint before shutdown.
 
-`push_changes()` — checks if a remote exists first (warns and skips gracefully if not). Runs `git push origin main` with a 30-second timeout. Push failure is non-fatal — the local commit already succeeded, data is safe. Will retry on next cycle.
+**main()** — core loop: `while true; sleep; commit if changed; push if committed; done`
 
-`cleanup()` — trap for SIGTERM/SIGINT/SIGHUP. Runs a final commit+push before the process dies. This means stopping the service gracefully via systemctl will flush any uncommitted changes first.
+### vault-observer.service
 
-`main()` — the core loop. `while true; do sleep $INTERVAL; commit and push if changes; done`
+Template file. Contains `__PLACEHOLDER__` strings that `install.sh` replaces with real values via `sed`. After install, the real file lives at `~/.config/systemd/user/vault-observer.service`.
 
-**Installed location:** `~/.local/bin/vault-observer.sh`
-
-### `vault-observer.service`
-
-The systemd user service config. Analogous to a PM2 config or Docker Compose service definition.
-
-**Key directives:**
-
-- `ExecStart` — points to the script location
-- `Environment` — sets VAULT_DIR, INTERVAL_SECONDS, LOG_FILE, GIT_BRANCH, GIT_REMOTE
-- `Restart=on-failure` — restarts if it crashes, not if stopped manually
-- `CPUQuota=5%` — hard cap at 5% of one core
-- `MemoryMax=64M` — hard cap at 64MB RAM
-- `Nice=15` — low priority, yields to other processes
+Key resource limits:
+- `CPUQuota=5%` — hard cap
+- `MemoryMax=64M` — hard cap (typical use ~18MB)
+- `Nice=15` — low priority
 - `IOSchedulingClass=idle` — lowest IO priority
 
-**Installed location:** `~/.config/systemd/user/vault-observer.service`
+**Critical rule:** After editing the service file, always run `systemctl --user daemon-reload`. After editing only the `.sh` script, daemon-reload is not needed — just restart.
 
-**Critical rule:** After editing this file, always run `systemctl --user daemon-reload` before restarting the service. If you only edit the `.sh` script, daemon-reload is not needed — just restart.
+### install.sh
 
-### `install.sh`
-
-Interactive setup wizard. Run once. Analogous to `npm create vite@latest`.
-
-**What it does:**
-
-1. Checks for and installs `git` if missing
-2. Prompts for vault path and interval
-3. Copies `vault-observer.sh` to `~/.local/bin/`
-4. Patches the service file with the user's actual vault path and interval
-5. Copies service file to `~/.config/systemd/user/`
-6. Runs `loginctl enable-linger` so the service survives user logout
-7. Runs `systemctl --user daemon-reload && enable && start`
-8. Confirms the service is active
+1. Checks for `config.env` in same directory — exits if missing
+2. Sources `config.env` to load all variables
+3. Expands `$HOME` in paths manually (shell substitution doesn't always work inside sourced files)
+4. Shows loaded settings and asks for confirmation
+5. Checks/installs git if missing
+6. Checks vault directory exists, creates if not
+7. Stops existing service if running
+8. Copies `vault-observer.sh` to `~/.local/bin/` and makes executable
+9. Uses `sed` to fill all `__PLACEHOLDER__` values in service template, writes result to `~/.config/systemd/user/vault-observer.service`
+10. Runs `loginctl enable-linger` so service survives logout
+11. Runs daemon-reload, enable, start
+12. Confirms service is active
 
 ---
 
-## Problems Encountered During Setup — Full Chronology
+## Problems Encountered — Full Chronology
 
 ### Problem 1: Push failed (exit 128) on first commit
 
-**Log line:**
-
-```bash
-[ERROR] Push failed (exit 128) — commit is safe locally, will retry on next commit.
-```
-
-**Root cause:** The vault directory was initialized as a fresh git repo by the installer (because it had no `.git` folder), so it had no remote configured. The SSH test the user ran earlier was against a different directory.
-
-**Diagnosis command:**
-
-```bash
-git -C ~/obsidian-vault remote -v
-```
+**Cause:** Installer created a fresh git repo in the vault directory (because it had no `.git` folder). Fresh repos have no remote configured. The SSH test the user ran earlier was against a different directory.
 
 **Fix:**
-
 ```bash
 git -C ~/obsidian-vault remote add origin git@github.com:MdSakifHossain/REPO.git
 ```
 
-Then a manual push from VSCode worked because VSCode has its own credential layer.
+### Problem 2: Terminal asked for credentials when pushing manually
 
-### Problem 2: Terminal asked for username and password when pushing manually
-
-**Root cause:** VSCode uses its own credential helper (libsecret/GNOME keyring integration) that silently authenticates. The system terminal had no credential helper configured.
+**Cause:** VSCode has its own credential helper (GNOME keyring integration). Terminal git uses a separate credential system. They are independent.
 
 **Fix:**
-
 ```bash
 git config --global credential.helper store
 git -C ~/obsidian-vault push origin main
 ```
 
-Enter credentials once. After that, Git stores them in `~/.git-credentials` in plaintext. All subsequent pushes — from the terminal, from the observer script, from anywhere — work silently.
+Enter username and Personal Access Token once. Stored permanently in `~/.git-credentials`. All future pushes silent.
 
-**Important:** GitHub no longer accepts account passwords for Git operations. The password field requires a Personal Access Token (PAT). Generate at: GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → check `repo` scope → set `No expiration`.
+**Important:** GitHub no longer accepts account passwords for Git operations over HTTPS. Must use a Personal Access Token. Generate at: GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → check `repo` → set `No expiration`.
 
-### Problem 3: Continued "No staged changes" entries in log after push failure
+### Problem 3: Commit message `@` symbol became a broken GitHub link
 
-**What happened:** After the push failed and credentials were fixed, the test file kept generating MODIFY events in the V1 log. Each event triggered the cooldown but since the file content hadn't changed (only metadata), git had nothing to commit.
+**Cause:** GitHub interprets `@` in commit messages as a user mention. `@06` pointed to `https://github.com/06`.
 
-**This was not a bug.** inotify fires on metadata changes too (e.g. access time). The `git diff --cached --quiet` check inside `commit_changes()` correctly detected nothing had actually changed and skipped the commit. The V2 polling model handles this even more cleanly — it just checks diff at wake time without reacting to every event.
+**Original format:** `date '+%d-%m-%Y @%I:%M %p'`
+**Fixed format:** `date '+%d-%m-%Y %I:%M %p'`
+**Result:** `Observer: Pushed at 25-04-2026 06:34 PM`
+
+Appears in two places in `vault-observer.sh` — once in `commit_changes()` and once in `check_vault()` for the initial commit message.
+
+### Problem 4: Editing installed files directly instead of the cloned repo
+
+**Cause:** V1 and V2 had no single config file. To change settings, user had to edit `~/.local/bin/vault-observer.sh` directly, which is the installed copy — not the source repo. This meant the cloned repo and the running installation could get out of sync.
+
+**Fix:** V3 introduced `config.env`. All settings live there. Running `./install.sh` always applies the current config to the installation. The installed files are now treated as build artifacts, not source files.
+
+### Problem 5: Removing .obsidian from GitHub tracking
+
+**User question:** Does adding `.obsidian/` to `.gitignore` remove it from GitHub if it's already there?
+
+**Answer:** No. `.gitignore` only prevents untracked files from being tracked. Files already tracked continue to be tracked even if added to `.gitignore`. Must use `git rm -r --cached .obsidian/` to stop tracking without deleting local files.
+
+**Full fix sequence:**
+```bash
+echo ".obsidian/" >> ~/obsidian-vault/.gitignore
+git -C ~/obsidian-vault rm -r --cached .obsidian/
+git -C ~/obsidian-vault add .gitignore
+git -C ~/obsidian-vault commit -m "chore: remove .obsidian from tracking"
+git -C ~/obsidian-vault push origin main
+```
 
 ---
 
-## Key Conceptual Explanations Given During Session
+## Key Conceptual Explanations
 
-### Why cooldown/debounce (V1) is wrong for this use case
+### Polling vs event-driven — why polling wins here
 
-The V1 model resets the timer on every file change. If you edit continuously, the timer never completes until you stop. In a 13-minute editing session followed by a power cut 10 seconds before the cooldown ends, you lose 13 minutes of work. The cooldown model is optimized for write efficiency (don't commit mid-session), not data safety.
+Event-driven (debounce): timer resets on every file change. During continuous editing, timer never completes until you stop. 13 minutes of editing + power cut before cooldown = 13 minutes lost.
 
-### Why polling (V2) is correct for this use case
+Polling: wakes on fixed schedule regardless of activity. 13 minutes of editing = at most one interval lost. Correct model for data safety as the primary concern.
 
-The interval is fixed and independent of user activity. It does not matter if you are actively editing or idle — the observer wakes up, checks, commits, and sleeps. The worst case is always exactly one interval. This is called a checkpoint interval pattern and is the standard approach in systems where data safety is the priority over write efficiency.
+### git add -A vs git add .
 
-### What inotify is
-
-The Linux kernel's built-in filesystem event notification system. Programs register interest in a directory and the kernel sends them events (MODIFY, CREATE, DELETE, etc.) the moment they happen. `inotifywait` is a command-line tool that wraps inotify. In V2 this entire system was removed — it is no longer needed.
+`git add .` stages new and modified files only.
+`git add -A` stages new, modified, AND deleted files.
+The observer uses `-A` specifically so deletions are committed too. If you delete a note, that deletion propagates to GitHub.
 
 ### What systemd is
 
-Linux's startup and process manager. Analogous to PM2 in the Node ecosystem. The `.service` file tells systemd what to run, when to start it, how to restart it on failure, and what resource limits to apply. `systemctl --user` commands manage services in the current user's scope (no sudo required).
+Linux's process manager. Analogous to PM2 in Node. The `.service` file tells systemd what to run, when to start it, how to restart on failure, and what resource limits to apply. `systemctl --user` manages services in the current user's scope without sudo.
 
-### What `loginctl enable-linger` does
+### What loginctl enable-linger does
 
-By default, user systemd services stop when the user logs out. `enable-linger` keeps them running even when no session is active. Required for the observer to survive a logout/login cycle.
+By default, user systemd services stop when the user logs out. Linger keeps them running even with no active session.
 
-### VSCode vs terminal credential difference
+### VSCode vs terminal credentials
 
-VSCode ships with a Git credential helper that integrates with the OS keychain (GNOME Keyring on Ubuntu). When you authenticate via VSCode, credentials are stored there. The terminal's Git installation uses a separate credential helper configuration. They are independent. Setting `credential.helper store` for the terminal makes it save credentials to `~/.git-credentials` after the first successful push, syncing the behavior.
+VSCode integrates with the OS keychain silently. Terminal git uses whatever `credential.helper` is configured globally. Setting `credential.helper store` makes terminal git save credentials to `~/.git-credentials` after first use. Independent systems — fixing one does not fix the other.
 
-### SSH "does not provide shell access" message
+### SSH "does not provide shell access"
 
-When running `ssh -T git@github.com`, GitHub responds with:
+Always appears in the response to `ssh -T git@github.com`. Normal. GitHub is not a shell server. The meaningful part is `You've successfully authenticated`.
 
-```bash
-Hi MdSakifHossain! You've successfully authenticated, but GitHub does not provide shell access.
-```
+### gitignore only works on untracked files
 
-The second sentence is always there and always normal. GitHub is not a shell server. The important part is `You've successfully authenticated`. This means SSH keys are working correctly.
+Files already committed to git remain tracked even if added to `.gitignore`. Must use `git rm --cached` to untrack them first. `--cached` means remove from git's index only — local files on disk are untouched.
 
 ---
 
-## Current State (End of Session)
+## Current State
 
-- V2 polling observer is installed and running
-- SSH authentication confirmed working
-- GitHub remote confirmed configured on the vault
-- Credentials stored via `credential.helper store`
-- First successful push confirmed in log:
-
-```bash
-[24-04-2026 18:40:46] [INFO] Pushed successfully to origin/main
-```
-
-- Service set to start on boot via systemd user service with linger enabled
+- V3 installed and running
+- SSH auth confirmed working for MdSakifHossain
+- GitHub remote confirmed on vault
+- Credentials stored via credential.helper store
+- Commit message format: `Observer: Pushed at 25-04-2026 06:34 PM`
+- `.obsidian/` removed from tracking (user intended to do this)
+- config.env established as single source of truth
+- Workflow confirmed: edit config.env → ./install.sh → done
 
 ---
 
-## Things the User May Want to Change Later
+## User's Mental Model — JS Analogies That Worked
 
-All of these are documented in the README. Summarized here for quick reference:
+| Bash/Linux concept | JS equivalent used |
+|---|---|
+| systemd service | PM2 config / Docker Compose service |
+| `vault-observer.sh` | `server.js` |
+| `install.sh` | `npm create vite@latest` |
+| `config.env` | `.env` file |
+| polling loop | `while(true) { await sleep(); check(); }` |
+| `git add -A` | staging everything including deletions |
+| `git diff --cached` | checking if staging area has anything |
+| `credential.helper store` | saving auth token to disk |
+| `__PLACEHOLDER__` in service template | template literals / string interpolation |
+| `sed` replacing placeholders | `.replace()` on a string |
 
-| Change                | File to edit                                               | Reload needed                     |
-| --------------------- | ---------------------------------------------------------- | --------------------------------- |
-| Interval length       | `~/.config/systemd/user/vault-observer.service`            | daemon-reload + restart           |
-| Vault path            | `~/.config/systemd/user/vault-observer.service`            | daemon-reload + restart           |
-| Commit message text   | `~/.local/bin/vault-observer.sh` (commit_changes function) | restart only                      |
-| Which files to ignore | `~/obsidian-vault/.gitignore`                              | nothing, takes effect next commit |
-| Script filename       | both service file and rename the script file               | daemon-reload + restart           |
-| Git branch name       | service file, `GIT_BRANCH` variable                        | daemon-reload + restart           |
-| Git remote name       | service file, `GIT_REMOTE` variable                        | daemon-reload + restart           |
-
----
-
-## User's Mental Model (Important for Future Explanations)
-
-The user thinks in JavaScript. Always use JS analogies first. Key mappings that worked well:
-
-- systemd service → PM2 config / Docker Compose service
-- `vault-observer.sh` → `server.js`
-- `install.sh` → `npm create vite@latest`
-- inotify → `fs.watch()` (Node)
-- debounce/cooldown → `setTimeout` + `clearTimeout`
-- polling loop → `while(true) { await sleep(); checkAndCommit(); }`
-- `.gitignore` → already knows what this is from VSCode usage
-- `git diff --cached` → checking if staging area has anything before committing
-
-The user asks good, precise questions and catches real design flaws (like the 13-minute editing scenario). Do not oversimplify. Explain tradeoffs honestly.
+User asks precise questions, catches real design flaws, and reasons well from first principles. Do not oversimplify. Explain tradeoffs honestly. When in doubt, use a JS analogy first.
